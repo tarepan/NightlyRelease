@@ -1,0 +1,91 @@
+name: build
+on:
+  push:
+    branches:
+      - master
+  release:
+    types:
+      - created
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "バージョン情報（A.BB.C / A.BB.C-preview.D）"
+        required: true
+      prerelease:
+        description: "プレリリースかどうか"
+        type: boolean
+        default: true
+      code_signing:
+        description: "コード署名する"
+        type: boolean
+        default: false
+      upload_artifact:
+        description: "デバッグ用に成果物をartifactにアップロードするか"
+        type: boolean
+        default: false
+
+env:
+  PYTHON_VERSION: "3.11.3"
+  VOICEVOX_RESOURCE_VERSION: "0.14.4"
+  VOICEVOX_CORE_VERSION: "0.14.5"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  config: # 全 jobs で利用する定数の定義. `env` が利用できないコンテキストでも利用できる.
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.vars.outputs.version }}
+      version_or_latest: ${{ steps.vars.outputs.version_or_latest }}
+    steps:
+      - name: declare variables
+        id: vars
+        run: |
+          : # release タグ名, または workflow_dispatch でのバージョン名. リリースでない (push event) 場合は空文字列
+          echo "version=${{ github.event.release.tag_name || github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          : # release タグ名, または workflow_dispatch でのバージョン名, または 'latest'
+          echo "version_or_latest=${{ github.event.release.tag_name || github.event.inputs.version || 'latest' }}" >> $GITHUB_OUTPUT
+
+  build-and-upload:
+    needs: [config]
+    environment: ${{ github.event.inputs.code_signing == 'true' && 'code_signing' || '' }} # コード署名用のenvironment
+    strategy:
+      matrix:
+        include:
+          # Linux CPU
+          - os: ubuntu-20.04
+            architecture: "x64"
+            voicevox_core_asset_prefix: voicevox_core-linux-x64-cpu
+            onnxruntime_url: https://github.com/microsoft/onnxruntime/releases/download/v1.13.1/onnxruntime-linux-x64-1.13.1.tgz
+            target: linux-cpu
+    runs-on: ${{ matrix.os }}
+
+    env:
+      # GNUコマンド
+      sed: ${{ startsWith(matrix.os, 'macos-') && 'gsed' || 'sed' }}
+      split: ${{ startsWith(matrix.os, 'macos-') && 'gsplit' || 'split' }}
+
+    steps:
+      - name: declare variables
+        id: vars
+        run: |
+          echo "package_name=voicevox_engine-${{ matrix.target }}-${{ needs.config.outputs.version }}" >> $GITHUB_OUTPUT
+
+      - uses: actions/checkout@v4
+
+      # NOTE: The default 'sed' and 'split' of macOS is BSD 'sed' and 'split'.
+      #       There is a difference in specification between BSD 'sed' and 'split' and GNU 'sed' and 'split',
+      #       so you need to install GNU 'sed' and 'split'.
+      - name: Install GNU sed on macOS
+        if: startsWith(matrix.os, 'macos-')
+        run: |
+          brew install gnu-sed coreutils
+
+      - name: Change latest dev tag to this commit for refreshing the release # c.f. voicevox_engine#854
+        run: |
+          git tag -f ${{ needs.config.outputs.version }}
+          git push -f --tag
+        shell: bash
+
